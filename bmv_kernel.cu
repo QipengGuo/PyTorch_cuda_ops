@@ -36,28 +36,28 @@ __global__ void bmm_kernel(const scalar_t* __restrict__ A, const scalar_t* __res
 }
 */
 
-// (b, n, m) (b, m) = (b,n,p) b->block, n->tx, p->ty
-template <typename scalar_t>
-__global__ void bmv_kernel(const scalar_t* __restrict__ A, const scalar_t* __restrict__ B, scalar_t* __restrict__ C, const int n, const int m, const int p) {
-    int i = blockIdx.x;
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    scalar_t sum = 0;
-    for (int x=ty; x<m; x += blockDim.y) {
-	    sum += A[(i*n+tx)*m+x] * B[i*m+x];
-    }
-    C[((i*n)+tx)*blockDim.y+ty] = sum;
-}
 
+// (b, n, m) (b, m) where n>>m ,b-> block, tx->n
 template <typename scalar_t>
-__global__ void reduce(const scalar_t* __restrict__ A, scalar_t* __restrict__ B, const int n, const int p) {
+__global__ void bmv_kernel(const scalar_t* __restrict__ A, const scalar_t* __restrict__ B, scalar_t* __restrict__ C, const int n, const int m) {
+//    __shared__ scalar_t la[5];
     int i = blockIdx.x;
     int tx = threadIdx.x;
-    scalar_t sum = 0;
-    for (int x=0; x<p; x++){
-	    sum += A[(i*n+tx)*p+x];
+//    if (tx<m) la[tx] = B[i*m+tx];
+//    __syncthreads();
+
+    int i1 = i*n;
+    for (int x=tx; x<n; x+= blockDim.x) {
+//        scalar_t sum = 0;
+        int i2 = (i1+x)*m;
+        int i3 = i*m;
+//        for (int y=0; y<m; y++) {
+//            sum += A[(i*n+x)*m+y] * la[y];
+//            sum += A[i2+y] * B[i3+y];
+//        }
+        C[i1+x] = A[i2] * B[i3] + A[i2+1] * B[i3+1] + A[i2+2] * B[i3+2] + A[i2+3] * B[i3+3] + A[i2+4] * B[i3+4];
+//        C[i1+x] = sum;
     }
-    B[i*n+tx] = sum;
 }
 
 } // End of namespace
@@ -71,10 +71,9 @@ at::Tensor bmv_cuda_forward(
     const auto m = A.size(2);
     assert(m == B.size(1));
 
-    auto y = at::zeros({b, n, 4}, A.options());
-    auto C = at::zeros({b, n}, A.options());
+    auto y = at::zeros({b, n}, A.options());
 
-    const dim3 threads(n, 4);
+    const dim3 threads(n);
     const dim3 blocks(b);
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -83,17 +82,9 @@ at::Tensor bmv_cuda_forward(
             A.data<scalar_t>(),
             B.data<scalar_t>(),
             y.data<scalar_t>(),
-            n, m, 4);
+            n, m);
     }));
     THCudaCheck(cudaGetLastError());
 
-    const dim3 threads1(n);
-    AT_DISPATCH_FLOATING_TYPES(A.type(), "bmv_cuda_forward2", ([&] {
-        reduce<scalar_t><<<blocks, threads1, 0, stream>>>(
-            y.data<scalar_t>(),
-            C.data<scalar_t>(),
-            n, 4);
-    }));
-    THCudaCheck(cudaGetLastError());
-    return C;
+    return y;
 }
